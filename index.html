@@ -1,0 +1,1728 @@
+import React, { useState, useMemo, useRef, useEffect } from "react";
+import {
+  Sankey,
+  Layer,
+  Rectangle,
+  BarChart,
+  Bar,
+  XAxis,
+  YAxis,
+  ResponsiveContainer,
+  PieChart,
+  Pie,
+  Cell,
+  Tooltip,
+  CartesianGrid,
+} from "recharts";
+import {
+  Home as HomeIcon,
+  BookOpen,
+  Compass,
+  MessageSquare,
+  Settings as SettingsIcon,
+  EyeOff,
+  Eye,
+  ChevronRight,
+  Sparkles,
+  Plus,
+  Send,
+  TrendingUp,
+  ArrowRight,
+  Trash2,
+  Loader2,
+} from "lucide-react";
+
+/* =========================================================================
+   AGENTIC FIRE PLANNER — single-file React artifact
+   Architecture mirrors the r/nriFIRE concept: Home (visual) + Ledger (data)
+   + Context (situation) + Chat (agent) + Settings (config).
+   Currency: USD ↔ INR. Audience: NRI FIRE planners.
+   ========================================================================= */
+
+const NAVY = "#0f1729";
+const INK = "#1a1a2e";
+const MUTED = "#6b7280";
+const BORDER = "#e5e7eb";
+const BORDER_SOFT = "#eef0f3";
+const CREAM = "#f5f1ea";
+const PAPER = "#fcfbf7";
+const BLUE = "#2563eb";
+const BLUE_SOFT = "#dbeafe";
+const BLUE_DEEP = "#1e40af";
+const GREEN = "#059669";
+const RED = "#dc2626";
+const AMBER = "#f59e0b";
+
+const CATEGORY_COLORS = {
+  Housing: "#2563eb",
+  Food: "#7c3aed",
+  Transport: "#0891b2",
+  Health: "#dc2626",
+  Entertainment: "#f59e0b",
+  Education: "#059669",
+  Other: "#64748b",
+};
+
+/* ---------- INITIAL STATE — realistic NRI profile ---------- */
+const INITIAL_STATE = {
+  income: [
+    { id: 1, name: "Salary", annualUSD: 185000 },
+    { id: 2, name: "RSU", annualUSD: 65000 },
+    { id: 3, name: "Bonus", annualUSD: 28000 },
+  ],
+  expenses: [
+    { id: 1, category: "Housing", monthlyUSD: 3400 },
+    { id: 2, category: "Food", monthlyUSD: 1200 },
+    { id: 3, category: "Transport", monthlyUSD: 700 },
+    { id: 4, category: "Health", monthlyUSD: 450 },
+    { id: 5, category: "Education", monthlyUSD: 2800 },
+    { id: 6, category: "Entertainment", monthlyUSD: 600 },
+    { id: 7, category: "Other", monthlyUSD: 850 },
+  ],
+  assets: [
+    { id: 1, name: "401(k)", type: "Retirement", valueUSD: 380000 },
+    { id: 2, name: "Roth IRA", type: "Retirement", valueUSD: 95000 },
+    { id: 3, name: "Brokerage (VTI/VXUS)", type: "Brokerage", valueUSD: 240000 },
+    { id: 4, name: "HYSA / Emergency", type: "Cash", valueUSD: 75000 },
+    { id: 5, name: "India MFs (NRO)", type: "India", valueUSD: 48000 },
+    { id: 6, name: "Primary residence", type: "Real estate", valueUSD: 720000 },
+  ],
+  liabilities: [
+    { id: 1, name: "Mortgage", balanceUSD: 410000, ratePct: 6.25 },
+    { id: 2, name: "Auto loan", balanceUSD: 22000, ratePct: 5.9 },
+  ],
+  context: {
+    age: 42,
+    spouseAge: 39,
+    children: 2,
+    visaStatus: "Green Card (since 2022)",
+    plannedReturnYear: 2032,
+    targetCorpusUSD: 1800000,
+    notes:
+      "Two daughters — eldest at boarding school. Want to optimize RNOR window before triggering ROR. Spouse considering part-time consulting in India.",
+  },
+  settings: {
+    displayCurrency: "INR", // "INR" | "USD"
+    fxUSDtoINR: 83.5,
+    nominalReturnPct: 7.0,
+    inflationPct: 4.5,
+    effectiveTaxPct: 26,
+    projectionYears: 15,
+  },
+};
+
+/* ---------- formatting helpers ---------- */
+function fmtCurrency(usd, state, opts = {}) {
+  const { displayCurrency, fxUSDtoINR } = state.settings;
+  const compact = opts.compact ?? true;
+  if (displayCurrency === "INR") {
+    const inr = usd * fxUSDtoINR;
+    if (compact) {
+      if (inr >= 1e7) return `₹${(inr / 1e7).toFixed(2)} Cr`;
+      if (inr >= 1e5) return `₹${(inr / 1e5).toFixed(2)} L`;
+      return `₹${Math.round(inr).toLocaleString("en-IN")}`;
+    }
+    return `₹${Math.round(inr).toLocaleString("en-IN")}`;
+  }
+  if (compact) {
+    if (Math.abs(usd) >= 1e6) return `$${(usd / 1e6).toFixed(2)}M`;
+    if (Math.abs(usd) >= 1e3) return `$${(usd / 1e3).toFixed(1)}K`;
+  }
+  return `$${Math.round(usd).toLocaleString("en-US")}`;
+}
+
+function fmtPct(v, digits = 0) {
+  return `${(v * 100).toFixed(digits)}%`;
+}
+
+/* ---------- derived totals ---------- */
+function useDerived(state) {
+  return useMemo(() => {
+    const grossIncomeUSD = state.income.reduce((a, b) => a + b.annualUSD, 0);
+    const taxUSD = grossIncomeUSD * (state.settings.effectiveTaxPct / 100);
+    const netIncomeUSD = grossIncomeUSD - taxUSD;
+    const annualExpensesUSD =
+      state.expenses.reduce((a, b) => a + b.monthlyUSD, 0) * 12;
+    const savingsUSD = Math.max(netIncomeUSD - annualExpensesUSD, 0);
+
+    const assetsUSD = state.assets.reduce((a, b) => a + b.valueUSD, 0);
+    const liabilitiesUSD = state.liabilities.reduce(
+      (a, b) => a + b.balanceUSD,
+      0
+    );
+    const netWorthUSD = assetsUSD - liabilitiesUSD;
+
+    // simple investable assets (exclude primary residence for FIRE math)
+    const investableUSD = state.assets
+      .filter((a) => a.type !== "Real estate")
+      .reduce((a, b) => a + b.valueUSD, 0);
+
+    return {
+      grossIncomeUSD,
+      taxUSD,
+      netIncomeUSD,
+      annualExpensesUSD,
+      savingsUSD,
+      assetsUSD,
+      liabilitiesUSD,
+      netWorthUSD,
+      investableUSD,
+    };
+  }, [state]);
+}
+
+/* ---------- multi-year projection ---------- */
+function projectWealth(state, derived) {
+  const { nominalReturnPct, inflationPct, projectionYears } = state.settings;
+  const r = nominalReturnPct / 100;
+  const inf = inflationPct / 100;
+  const series = [];
+  let nw = derived.netWorthUSD;
+  let savings = derived.savingsUSD;
+  for (let i = 0; i < projectionYears; i++) {
+    const year = new Date().getFullYear() + i;
+    const returnsThisYear = nw * r;
+    const cumulativeSavings = i === 0 ? savings : series[i - 1].cumSavings + savings;
+    series.push({
+      year,
+      yearLabel: `'${String(year).slice(2)}`,
+      netWorthUSD: nw,
+      cumSavings: cumulativeSavings,
+      returnsUSD: returnsThisYear,
+    });
+    nw = nw * (1 + r) + savings;
+    savings = savings * (1 + inf); // savings grow with inflation
+  }
+  return series;
+}
+
+/* =========================================================================
+   APP ROOT
+   ========================================================================= */
+export default function App() {
+  const [state, setState] = useState(INITIAL_STATE);
+  const [tab, setTab] = useState("home");
+
+  return (
+    <>
+      <style>{`
+        @import url('https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,500;9..144,600;9..144,700&family=DM+Sans:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap');
+
+        * { box-sizing: border-box; }
+        html, body, #root { margin: 0; padding: 0; }
+
+        .ext-bg {
+          min-height: 100vh;
+          background:
+            radial-gradient(circle at 20% 10%, #ede5d6 0%, transparent 40%),
+            radial-gradient(circle at 80% 70%, #e8eef5 0%, transparent 45%),
+            ${CREAM};
+          font-family: 'DM Sans', system-ui, sans-serif;
+          color: ${INK};
+          padding: 32px 16px 80px;
+          display: flex;
+          flex-direction: column;
+          align-items: center;
+        }
+
+        .ext-header {
+          max-width: 420px;
+          width: 100%;
+          margin-bottom: 24px;
+          text-align: center;
+        }
+        .ext-header .eyebrow {
+          font-family: 'JetBrains Mono', monospace;
+          font-size: 10px;
+          letter-spacing: 0.18em;
+          text-transform: uppercase;
+          color: ${MUTED};
+          margin-bottom: 8px;
+        }
+        .ext-header .title {
+          font-family: 'Fraunces', serif;
+          font-weight: 500;
+          font-size: 32px;
+          line-height: 1.1;
+          color: ${NAVY};
+          letter-spacing: -0.02em;
+          margin: 0;
+        }
+        .ext-header .title em {
+          font-style: italic;
+          font-weight: 400;
+          color: ${BLUE_DEEP};
+        }
+        .ext-header .sub {
+          font-size: 13px;
+          color: ${MUTED};
+          margin-top: 6px;
+        }
+
+        .phone {
+          width: 390px;
+          max-width: 100%;
+          background: ${PAPER};
+          border-radius: 36px;
+          box-shadow:
+            0 1px 0 rgba(255,255,255,0.9) inset,
+            0 30px 80px -20px rgba(15,23,41,0.25),
+            0 8px 16px -8px rgba(15,23,41,0.15);
+          border: 1px solid rgba(15,23,41,0.08);
+          overflow: hidden;
+          display: flex;
+          flex-direction: column;
+          height: 780px;
+          position: relative;
+        }
+
+        .status-bar {
+          height: 36px;
+          background: ${PAPER};
+          display: flex;
+          align-items: center;
+          justify-content: space-between;
+          padding: 0 24px;
+          font-size: 11px;
+          font-weight: 600;
+          color: ${INK};
+          font-family: 'DM Sans', sans-serif;
+        }
+        .notch {
+          width: 90px;
+          height: 24px;
+          background: ${INK};
+          border-radius: 14px;
+          position: relative;
+        }
+        .notch::after {
+          content: '';
+          position: absolute;
+          right: 8px; top: 50%;
+          transform: translateY(-50%);
+          width: 8px; height: 8px;
+          background: ${RED};
+          border-radius: 50%;
+        }
+
+        .tab-content {
+          flex: 1;
+          overflow-y: auto;
+          padding: 4px 20px 16px;
+          scrollbar-width: thin;
+        }
+        .tab-content::-webkit-scrollbar { width: 4px; }
+        .tab-content::-webkit-scrollbar-thumb { background: ${BORDER}; border-radius: 2px; }
+
+        .tab-header {
+          display: flex; align-items: center; justify-content: space-between;
+          padding: 14px 4px 10px;
+        }
+        .tab-title {
+          font-family: 'Fraunces', serif;
+          font-weight: 600;
+          font-size: 26px;
+          color: ${NAVY};
+          letter-spacing: -0.02em;
+          margin: 0;
+        }
+        .ccy-toggle {
+          display: flex;
+          background: ${CREAM};
+          border-radius: 20px;
+          padding: 3px;
+          gap: 2px;
+        }
+        .ccy-toggle button {
+          border: none;
+          background: transparent;
+          font-family: 'DM Sans', sans-serif;
+          font-size: 11px;
+          font-weight: 600;
+          letter-spacing: 0.04em;
+          padding: 5px 12px;
+          border-radius: 16px;
+          color: ${MUTED};
+          cursor: pointer;
+          transition: all 0.2s;
+          display: flex; align-items: center; gap: 4px;
+        }
+        .ccy-toggle button.active {
+          background: ${PAPER};
+          color: ${NAVY};
+          box-shadow: 0 1px 2px rgba(0,0,0,0.05);
+        }
+
+        .nw-card {
+          background: ${PAPER};
+          border: 1px solid ${BORDER_SOFT};
+          border-radius: 18px;
+          padding: 18px 20px;
+          display: flex; align-items: center; justify-content: space-between;
+          margin-bottom: 6px;
+        }
+        .nw-card .label {
+          font-family: 'JetBrains Mono', monospace;
+          font-size: 9px;
+          letter-spacing: 0.16em;
+          text-transform: uppercase;
+          color: ${MUTED};
+          margin-bottom: 4px;
+        }
+        .nw-card .big {
+          font-family: 'Fraunces', serif;
+          font-weight: 600;
+          font-size: 28px;
+          color: ${NAVY};
+          letter-spacing: -0.02em;
+          line-height: 1;
+        }
+        .nw-card .meta {
+          font-size: 11px;
+          color: ${MUTED};
+          margin-top: 4px;
+          font-feature-settings: "tnum";
+        }
+        .eye-btn {
+          border: none; background: ${CREAM}; padding: 8px;
+          border-radius: 10px; color: ${MUTED}; cursor: pointer;
+          display: flex; align-items: center; justify-content: center;
+        }
+
+        .section-label {
+          text-align: center;
+          font-family: 'JetBrains Mono', monospace;
+          font-size: 10px;
+          letter-spacing: 0.18em;
+          text-transform: uppercase;
+          color: ${MUTED};
+          margin: 18px 0 8px;
+        }
+
+        .pill-toggle {
+          position: absolute;
+          left: 50%;
+          transform: translateX(-50%);
+          background: ${PAPER};
+          border: 1px solid ${BORDER};
+          border-radius: 999px;
+          padding: 6px 14px;
+          font-size: 12px;
+          font-weight: 600;
+          color: ${BLUE_DEEP};
+          font-family: 'DM Sans', sans-serif;
+          cursor: pointer;
+          box-shadow: 0 4px 12px rgba(15,23,41,0.08);
+          display: flex; align-items: center; gap: 6px;
+        }
+
+        .updates-card {
+          background: ${PAPER};
+          border: 1px solid ${BORDER_SOFT};
+          border-radius: 16px;
+          padding: 14px 16px;
+          margin-top: 16px;
+        }
+        .updates-card h4 {
+          font-family: 'Fraunces', serif;
+          font-weight: 600;
+          font-size: 16px;
+          color: ${NAVY};
+          margin: 0 0 10px;
+        }
+        .update-row {
+          display: flex; align-items: center; justify-content: space-between;
+          padding: 10px 12px;
+          background: ${BLUE_SOFT}40;
+          border-radius: 10px;
+          margin-bottom: 6px;
+          cursor: pointer;
+          transition: background 0.2s;
+        }
+        .update-row:hover { background: ${BLUE_SOFT}80; }
+        .update-row .left { display: flex; align-items: center; gap: 10px; }
+        .update-row .icon {
+          width: 28px; height: 28px; border-radius: 50%;
+          background: ${PAPER};
+          display: flex; align-items: center; justify-content: center;
+          color: ${BLUE};
+        }
+        .update-row .name {
+          font-size: 13px; font-weight: 600; color: ${NAVY};
+        }
+        .update-row .meta {
+          font-size: 10px; color: ${MUTED}; margin-top: 1px;
+        }
+
+        /* segmented controls */
+        .seg {
+          display: flex;
+          background: ${CREAM};
+          border-radius: 14px;
+          padding: 4px;
+          gap: 2px;
+          margin: 6px 0 14px;
+        }
+        .seg button {
+          flex: 1;
+          border: none;
+          background: transparent;
+          font-family: 'DM Sans', sans-serif;
+          font-size: 12px;
+          font-weight: 600;
+          padding: 8px 10px;
+          border-radius: 10px;
+          color: ${MUTED};
+          cursor: pointer;
+          display: flex; align-items: center; justify-content: center; gap: 5px;
+        }
+        .seg button.active {
+          background: ${PAPER};
+          color: ${NAVY};
+          box-shadow: 0 1px 2px rgba(0,0,0,0.05);
+        }
+
+        /* ledger row */
+        .ledger-row {
+          display: flex; align-items: center; justify-content: space-between;
+          padding: 12px 0;
+          border-bottom: 1px solid ${BORDER_SOFT};
+        }
+        .ledger-row:last-child { border-bottom: none; }
+        .ledger-row .name {
+          font-size: 14px; font-weight: 500; color: ${INK};
+        }
+        .ledger-row .sub {
+          font-size: 11px; color: ${MUTED}; margin-top: 1px;
+        }
+        .ledger-row .amt {
+          font-family: 'JetBrains Mono', monospace;
+          font-size: 13px;
+          font-weight: 500;
+          color: ${NAVY};
+          font-feature-settings: "tnum";
+        }
+
+        .add-btn {
+          width: 100%;
+          padding: 10px;
+          border-radius: 12px;
+          background: transparent;
+          border: 1px dashed ${BORDER};
+          color: ${MUTED};
+          font-family: 'DM Sans', sans-serif;
+          font-size: 12px;
+          font-weight: 500;
+          cursor: pointer;
+          margin-top: 10px;
+          display: flex; align-items: center; justify-content: center; gap: 6px;
+        }
+        .add-btn:hover { border-color: ${BLUE}; color: ${BLUE}; }
+
+        /* form fields */
+        .field {
+          display: flex; flex-direction: column;
+          margin-bottom: 14px;
+        }
+        .field label {
+          font-family: 'JetBrains Mono', monospace;
+          font-size: 9px;
+          letter-spacing: 0.14em;
+          text-transform: uppercase;
+          color: ${MUTED};
+          margin-bottom: 5px;
+        }
+        .field input, .field textarea, .field select {
+          font-family: 'DM Sans', sans-serif;
+          font-size: 14px;
+          color: ${INK};
+          padding: 10px 12px;
+          border: 1px solid ${BORDER};
+          border-radius: 10px;
+          background: ${PAPER};
+          outline: none;
+          transition: border-color 0.2s;
+        }
+        .field input:focus, .field textarea:focus, .field select:focus {
+          border-color: ${BLUE};
+        }
+        .field-row {
+          display: grid; grid-template-columns: 1fr 1fr; gap: 10px;
+        }
+
+        /* chat */
+        .chat-msgs {
+          flex: 1;
+          overflow-y: auto;
+          padding: 10px 4px;
+          display: flex; flex-direction: column; gap: 12px;
+        }
+        .chat-bubble {
+          max-width: 85%;
+          padding: 10px 14px;
+          border-radius: 16px;
+          font-size: 13.5px;
+          line-height: 1.5;
+          white-space: pre-wrap;
+          word-wrap: break-word;
+        }
+        .chat-bubble.user {
+          align-self: flex-end;
+          background: ${NAVY};
+          color: ${PAPER};
+          border-bottom-right-radius: 4px;
+        }
+        .chat-bubble.assistant {
+          align-self: flex-start;
+          background: ${PAPER};
+          border: 1px solid ${BORDER_SOFT};
+          color: ${INK};
+          border-bottom-left-radius: 4px;
+        }
+        .chat-bubble.assistant em {
+          color: ${BLUE_DEEP};
+          font-style: italic;
+        }
+        .chat-input {
+          display: flex; gap: 8px;
+          padding: 10px 4px 0;
+          border-top: 1px solid ${BORDER_SOFT};
+          margin-top: 8px;
+        }
+        .chat-input input {
+          flex: 1;
+          padding: 10px 14px;
+          border: 1px solid ${BORDER};
+          border-radius: 999px;
+          font-family: 'DM Sans', sans-serif;
+          font-size: 13px;
+          outline: none;
+        }
+        .chat-input input:focus { border-color: ${BLUE}; }
+        .chat-send {
+          width: 38px; height: 38px;
+          border: none;
+          background: ${NAVY};
+          color: ${PAPER};
+          border-radius: 50%;
+          cursor: pointer;
+          display: flex; align-items: center; justify-content: center;
+        }
+        .chat-send:disabled { background: ${BORDER}; cursor: not-allowed; }
+        .chat-empty {
+          text-align: center;
+          padding: 30px 16px;
+          color: ${MUTED};
+          font-size: 13px;
+        }
+        .chat-empty .glyph {
+          width: 48px; height: 48px; margin: 0 auto 12px;
+          background: ${BLUE_SOFT};
+          border-radius: 50%;
+          display: flex; align-items: center; justify-content: center;
+          color: ${BLUE_DEEP};
+        }
+        .chat-empty h3 {
+          font-family: 'Fraunces', serif;
+          font-weight: 600;
+          font-size: 18px;
+          color: ${NAVY};
+          margin: 0 0 6px;
+        }
+        .suggest-chip {
+          display: inline-block;
+          padding: 6px 12px;
+          margin: 4px;
+          background: ${PAPER};
+          border: 1px solid ${BORDER};
+          border-radius: 999px;
+          font-size: 11.5px;
+          color: ${INK};
+          cursor: pointer;
+          font-family: 'DM Sans', sans-serif;
+        }
+        .suggest-chip:hover { border-color: ${BLUE}; color: ${BLUE_DEEP}; }
+
+        /* bottom nav */
+        .bottom-nav {
+          background: ${PAPER};
+          border-top: 1px solid ${BORDER_SOFT};
+          padding: 8px 4px 14px;
+          display: grid;
+          grid-template-columns: repeat(5, 1fr);
+        }
+        .nav-btn {
+          background: transparent;
+          border: none;
+          padding: 6px 4px;
+          display: flex; flex-direction: column; align-items: center; gap: 3px;
+          cursor: pointer;
+          color: ${MUTED};
+          font-family: 'DM Sans', sans-serif;
+          font-size: 10px;
+          font-weight: 500;
+        }
+        .nav-btn.active { color: ${NAVY}; }
+        .nav-btn.active .nav-icon-wrap {
+          background: ${BLUE_SOFT};
+          color: ${BLUE_DEEP};
+        }
+        .nav-icon-wrap {
+          width: 32px; height: 32px;
+          border-radius: 10px;
+          display: flex; align-items: center; justify-content: center;
+          transition: all 0.2s;
+        }
+
+        /* footer credit under phone */
+        .ext-footer {
+          margin-top: 24px;
+          font-size: 11px;
+          color: ${MUTED};
+          text-align: center;
+          font-family: 'JetBrains Mono', monospace;
+          letter-spacing: 0.05em;
+          max-width: 420px;
+        }
+
+        @media (max-width: 440px) {
+          .phone { border-radius: 0; height: calc(100vh - 32px); width: 100%; }
+          .ext-bg { padding: 0; }
+          .ext-header { display: none; }
+          .ext-footer { display: none; }
+        }
+      `}</style>
+
+      <div className="ext-bg">
+        <div className="ext-header">
+          <div className="eyebrow">An agentic FIRE planner</div>
+          <h1 className="title">
+            Stop spreadsheeting<em>. Start asking.</em>
+          </h1>
+          <div className="sub">
+            For NRIs planning return, RNOR, and the corpus question — built around context, not cells.
+          </div>
+        </div>
+
+        <div className="phone">
+          <StatusBar />
+          {tab === "home" && <HomeTab state={state} setState={setState} />}
+          {tab === "ledger" && <LedgerTab state={state} setState={setState} />}
+          {tab === "context" && <ContextTab state={state} setState={setState} />}
+          {tab === "chat" && <ChatTab state={state} setTab={setTab} />}
+          {tab === "settings" && <SettingsTab state={state} setState={setState} />}
+          <BottomNav tab={tab} setTab={setTab} />
+        </div>
+
+        <div className="ext-footer">v0.1 · single-file · in-memory state</div>
+      </div>
+    </>
+  );
+}
+
+/* =========================================================================
+   STATUS BAR + NAV
+   ========================================================================= */
+function StatusBar() {
+  return (
+    <div className="status-bar">
+      <span>12:32</span>
+      <div className="notch" />
+      <span>5G</span>
+    </div>
+  );
+}
+
+function BottomNav({ tab, setTab }) {
+  const items = [
+    { id: "home", label: "Home", Icon: HomeIcon },
+    { id: "ledger", label: "Ledger", Icon: BookOpen },
+    { id: "context", label: "Context", Icon: Compass },
+    { id: "chat", label: "Chat", Icon: MessageSquare },
+    { id: "settings", label: "Settings", Icon: SettingsIcon },
+  ];
+  return (
+    <div className="bottom-nav">
+      {items.map(({ id, label, Icon }) => (
+        <button
+          key={id}
+          className={`nav-btn ${tab === id ? "active" : ""}`}
+          onClick={() => setTab(id)}
+        >
+          <div className="nav-icon-wrap">
+            <Icon size={16} />
+          </div>
+          <span>{label}</span>
+        </button>
+      ))}
+    </div>
+  );
+}
+
+/* =========================================================================
+   CCY TOGGLE
+   ========================================================================= */
+function CcyToggle({ state, setState }) {
+  const setCcy = (c) =>
+    setState((s) => ({ ...s, settings: { ...s.settings, displayCurrency: c } }));
+  const cur = state.settings.displayCurrency;
+  return (
+    <div className="ccy-toggle">
+      {["USD", "INR"].map((c) => (
+        <button
+          key={c}
+          className={cur === c ? "active" : ""}
+          onClick={() => setCcy(c)}
+        >
+          {cur === c && <span style={{ fontSize: 9 }}>✓</span>}
+          {c}
+        </button>
+      ))}
+    </div>
+  );
+}
+
+/* =========================================================================
+   HOME TAB
+   ========================================================================= */
+function HomeTab({ state, setState }) {
+  const [view, setView] = useState("flow"); // 'flow' | 'projection'
+  const [hideAmounts, setHideAmounts] = useState(false);
+  const derived = useDerived(state);
+
+  return (
+    <div className="tab-content">
+      <div className="tab-header">
+        <h1 className="tab-title">Home</h1>
+        <CcyToggle state={state} setState={setState} />
+      </div>
+
+      <div className="nw-card">
+        <div>
+          <div className="label">
+            {view === "flow" ? "Net worth" : "Projected at year 15"}
+          </div>
+          <div className="big">
+            {hideAmounts
+              ? "•••••"
+              : view === "flow"
+              ? fmtCurrency(derived.netWorthUSD, state)
+              : fmtCurrency(
+                  projectWealth(state, derived).at(-1).netWorthUSD,
+                  state
+                )}
+          </div>
+          <div className="meta">
+            {view === "flow"
+              ? `Assets ${fmtCurrency(derived.assetsUSD, state)} · Liab ${fmtCurrency(
+                  derived.liabilitiesUSD,
+                  state
+                )}`
+              : `Savings ${fmtCurrency(
+                  projectWealth(state, derived).at(-1).cumSavings,
+                  state
+                )} · Returns compounding`}
+          </div>
+        </div>
+        <button className="eye-btn" onClick={() => setHideAmounts((h) => !h)}>
+          {hideAmounts ? <Eye size={16} /> : <EyeOff size={16} />}
+        </button>
+      </div>
+
+      <div className="section-label">
+        {view === "flow" ? "Tap a category" : "Tap a year"}
+      </div>
+
+      <div style={{ position: "relative", marginBottom: 8 }}>
+        {view === "flow" ? (
+          <SankeyView state={state} derived={derived} />
+        ) : (
+          <ProjectionView state={state} derived={derived} />
+        )}
+
+        <button
+          className="pill-toggle"
+          style={{ bottom: -8 }}
+          onClick={() => setView(view === "flow" ? "projection" : "flow")}
+        >
+          {view === "flow" ? (
+            <>
+              <TrendingUp size={12} /> {state.settings.projectionYears} yrs
+            </>
+          ) : (
+            <>
+              <ArrowRight size={12} /> Flow
+            </>
+          )}
+        </button>
+      </div>
+
+      <div className="updates-card">
+        <h4>Updates</h4>
+        <div className="update-row">
+          <div className="left">
+            <div className="icon">
+              <PieChart size={14} />
+            </div>
+            <div>
+              <div className="name">Expenses</div>
+              <div className="meta">Last edited just now</div>
+            </div>
+          </div>
+          <ChevronRight size={16} color={MUTED} />
+        </div>
+        <div className="update-row">
+          <div className="left">
+            <div className="icon">
+              <Sparkles size={14} />
+            </div>
+            <div>
+              <div className="name">Ask the agent</div>
+              <div className="meta">Run a return-to-India scenario</div>
+            </div>
+          </div>
+          <ChevronRight size={16} color={MUTED} />
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* ---- Sankey: income → tax + (investments + savings + expenses) ---- */
+function SankeyView({ state, derived }) {
+  // Build nodes & links with magnitudes in a small unit (USD/1000) to keep recharts happy
+  const scale = 1; // we'll feed USD directly
+  const sources = state.income.map((i) => ({ name: i.name, value: i.annualUSD }));
+  const grossIdx = sources.length;
+  const taxIdx = grossIdx + 1;
+  const netIdx = grossIdx + 2;
+  const invIdx = grossIdx + 3;
+  const savIdx = grossIdx + 4;
+  const expIdx = grossIdx + 5;
+
+  const nodes = [
+    ...sources.map((s) => ({ name: s.name })),
+    { name: "All income" },
+    { name: "Taxes" },
+    { name: "Net income" },
+    { name: "Investments" },
+    { name: "Savings" },
+    { name: "Expenses" },
+  ];
+
+  // ratio of post-tax allocation
+  const investUSD = derived.savingsUSD * 0.7; // assume 70% of savings → invested
+  const stashUSD = derived.savingsUSD * 0.3; // 30% → cash savings (HYSA / India)
+  const links = [];
+  sources.forEach((src, i) => {
+    links.push({ source: i, target: grossIdx, value: Math.max(src.value, 1) * scale });
+  });
+  links.push({ source: grossIdx, target: taxIdx, value: Math.max(derived.taxUSD, 1) * scale });
+  links.push({ source: grossIdx, target: netIdx, value: Math.max(derived.netIncomeUSD, 1) * scale });
+  links.push({ source: netIdx, target: invIdx, value: Math.max(investUSD, 1) * scale });
+  links.push({ source: netIdx, target: savIdx, value: Math.max(stashUSD, 1) * scale });
+  links.push({ source: netIdx, target: expIdx, value: Math.max(derived.annualExpensesUSD, 1) * scale });
+
+  const data = { nodes, links };
+
+  const totalNet = derived.netIncomeUSD || 1;
+  const labels = {
+    Investments: `${Math.round((investUSD / totalNet) * 100)}%`,
+    Savings: `${Math.round((stashUSD / totalNet) * 100)}%`,
+    Expenses: `${Math.round((derived.annualExpensesUSD / totalNet) * 100)}%`,
+  };
+
+  const SankeyNode = ({ x, y, width, height, index, payload }) => {
+    const name = payload.name;
+    const isOutput = ["Investments", "Savings", "Expenses", "Taxes"].includes(name);
+    const isCenter = ["All income", "Net income"].includes(name);
+    const fill = isCenter ? BLUE_DEEP : isOutput ? BLUE : BLUE;
+    const lblRight = isOutput;
+    const labelText = isOutput && labels[name] ? `${name} ${labels[name]}` : name;
+    return (
+      <Layer>
+        <Rectangle
+          x={x}
+          y={y}
+          width={width}
+          height={height}
+          fill={fill}
+          fillOpacity={0.95}
+        />
+        <text
+          x={lblRight ? x + width + 6 : x - 6}
+          y={y + height / 2}
+          textAnchor={lblRight ? "start" : "end"}
+          dominantBaseline="middle"
+          fontFamily="DM Sans, sans-serif"
+          fontSize={9.5}
+          fontWeight={500}
+          fill={INK}
+        >
+          {labelText}
+        </text>
+      </Layer>
+    );
+  };
+
+  return (
+    <div style={{ background: PAPER, borderRadius: 16, border: `1px solid ${BORDER_SOFT}`, padding: "10px 8px 30px", height: 280 }}>
+      <ResponsiveContainer width="100%" height="100%">
+        <Sankey
+          data={data}
+          node={<SankeyNode />}
+          nodePadding={14}
+          nodeWidth={6}
+          link={{ stroke: BLUE, strokeOpacity: 0.18, fill: BLUE, fillOpacity: 0.18 }}
+          margin={{ top: 6, right: 70, bottom: 6, left: 50 }}
+        >
+          <Tooltip
+            formatter={(v) => fmtCurrency(v, state)}
+            contentStyle={{ fontSize: 11, fontFamily: "DM Sans" }}
+          />
+        </Sankey>
+      </ResponsiveContainer>
+    </div>
+  );
+}
+
+/* ---- Projection bar chart ---- */
+function ProjectionView({ state, derived }) {
+  const series = projectWealth(state, derived);
+  const [tappedIdx, setTappedIdx] = useState(null);
+  const tapped = tappedIdx !== null ? series[tappedIdx] : null;
+
+  return (
+    <div style={{ background: PAPER, borderRadius: 16, border: `1px solid ${BORDER_SOFT}`, padding: "14px 10px 30px", height: 280 }}>
+      {tapped && (
+        <div style={{ textAlign: "center", marginBottom: 4, fontSize: 11, color: MUTED }}>
+          <span style={{ fontFamily: "JetBrains Mono", color: NAVY, fontWeight: 600 }}>
+            {tapped.year}:
+          </span>{" "}
+          NW {fmtCurrency(tapped.netWorthUSD, state)} · Returns {fmtCurrency(tapped.returnsUSD, state)}
+        </div>
+      )}
+      <ResponsiveContainer width="100%" height="92%">
+        <BarChart data={series} margin={{ top: 8, right: 6, bottom: 6, left: 6 }}>
+          <CartesianGrid stroke={BORDER_SOFT} vertical={false} strokeDasharray="2 2" />
+          <XAxis
+            dataKey="yearLabel"
+            tick={{ fontSize: 9, fontFamily: "DM Sans", fill: MUTED }}
+            tickLine={false}
+            axisLine={{ stroke: BORDER }}
+          />
+          <YAxis hide />
+          <Tooltip
+            formatter={(v) => fmtCurrency(v, state)}
+            contentStyle={{ fontSize: 11, fontFamily: "DM Sans" }}
+            labelFormatter={(l, p) => (p[0] ? `Year ${p[0].payload.year}` : "")}
+          />
+          <Bar
+            dataKey="netWorthUSD"
+            radius={[4, 4, 0, 0]}
+            onClick={(_, idx) => setTappedIdx(idx)}
+          >
+            {series.map((d, i) => (
+              <Cell
+                key={i}
+                fill={tappedIdx === i ? BLUE_DEEP : BLUE}
+                fillOpacity={tappedIdx !== null && tappedIdx !== i ? 0.4 : 1}
+              />
+            ))}
+          </Bar>
+        </BarChart>
+      </ResponsiveContainer>
+    </div>
+  );
+}
+
+/* =========================================================================
+   LEDGER TAB
+   ========================================================================= */
+function LedgerTab({ state, setState }) {
+  const [section, setSection] = useState("assets"); // assets | liabilities | cashflow
+  const [cf, setCf] = useState("expenses"); // income | split | expenses
+  const derived = useDerived(state);
+
+  return (
+    <div className="tab-content">
+      <div className="tab-header">
+        <h1 className="tab-title">Ledger</h1>
+        <CcyToggle state={state} setState={setState} />
+      </div>
+
+      <div className="seg">
+        <button className={section === "assets" ? "active" : ""} onClick={() => setSection("assets")}>
+          Assets
+        </button>
+        <button className={section === "liabilities" ? "active" : ""} onClick={() => setSection("liabilities")}>
+          Liabilities
+        </button>
+        <button className={section === "cashflow" ? "active" : ""} onClick={() => setSection("cashflow")}>
+          Cashflow
+        </button>
+      </div>
+
+      {section === "assets" && <AssetsView state={state} setState={setState} />}
+      {section === "liabilities" && <LiabilitiesView state={state} setState={setState} />}
+      {section === "cashflow" && (
+        <>
+          <div className="seg" style={{ background: PAPER, border: `1px solid ${BORDER_SOFT}` }}>
+            <button className={cf === "income" ? "active" : ""} onClick={() => setCf("income")}>
+              Income
+            </button>
+            <button className={cf === "split" ? "active" : ""} onClick={() => setCf("split")}>
+              Split
+            </button>
+            <button className={cf === "expenses" ? "active" : ""} onClick={() => setCf("expenses")}>
+              Expenses
+            </button>
+          </div>
+          {cf === "income" && <IncomeView state={state} setState={setState} />}
+          {cf === "split" && <SplitView state={state} derived={derived} />}
+          {cf === "expenses" && <ExpensesView state={state} setState={setState} derived={derived} />}
+        </>
+      )}
+    </div>
+  );
+}
+
+function EditableRow({ name, sub, value, onValue, onName, onDelete, prefix = "$", placeholder = "" }) {
+  return (
+    <div className="ledger-row">
+      <div style={{ flex: 1 }}>
+        {onName ? (
+          <input
+            value={name}
+            onChange={(e) => onName(e.target.value)}
+            placeholder={placeholder}
+            style={{ border: "none", background: "transparent", fontSize: 14, fontWeight: 500, color: INK, padding: 0, outline: "none", width: "90%" }}
+          />
+        ) : (
+          <div className="name">{name}</div>
+        )}
+        {sub && <div className="sub">{sub}</div>}
+      </div>
+      <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+        <span style={{ fontSize: 11, color: MUTED }}>{prefix}</span>
+        <input
+          type="number"
+          value={value}
+          onChange={(e) => onValue(parseFloat(e.target.value || 0))}
+          style={{
+            border: `1px solid ${BORDER}`,
+            borderRadius: 8,
+            padding: "5px 8px",
+            width: 90,
+            fontFamily: "JetBrains Mono",
+            fontSize: 12,
+            textAlign: "right",
+          }}
+        />
+        {onDelete && (
+          <button onClick={onDelete} style={{ border: "none", background: "transparent", color: MUTED, cursor: "pointer", padding: 4 }}>
+            <Trash2 size={13} />
+          </button>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function AssetsView({ state, setState }) {
+  const update = (id, patch) =>
+    setState((s) => ({
+      ...s,
+      assets: s.assets.map((a) => (a.id === id ? { ...a, ...patch } : a)),
+    }));
+  const remove = (id) => setState((s) => ({ ...s, assets: s.assets.filter((a) => a.id !== id) }));
+  const add = () =>
+    setState((s) => ({
+      ...s,
+      assets: [...s.assets, { id: Date.now(), name: "New asset", type: "Other", valueUSD: 0 }],
+    }));
+
+  const total = state.assets.reduce((a, b) => a + b.valueUSD, 0);
+
+  return (
+    <>
+      <div className="nw-card" style={{ marginBottom: 12 }}>
+        <div>
+          <div className="label">Total assets</div>
+          <div className="big">{fmtCurrency(total, state)}</div>
+          <div className="meta">{state.assets.length} accounts</div>
+        </div>
+      </div>
+      <div style={{ background: PAPER, borderRadius: 14, border: `1px solid ${BORDER_SOFT}`, padding: "0 14px" }}>
+        {state.assets.map((a) => (
+          <EditableRow
+            key={a.id}
+            name={a.name}
+            sub={a.type}
+            value={a.valueUSD}
+            onValue={(v) => update(a.id, { valueUSD: v })}
+            onName={(v) => update(a.id, { name: v })}
+            onDelete={() => remove(a.id)}
+          />
+        ))}
+      </div>
+      <button className="add-btn" onClick={add}>
+        <Plus size={13} /> Add asset
+      </button>
+    </>
+  );
+}
+
+function LiabilitiesView({ state, setState }) {
+  const update = (id, patch) =>
+    setState((s) => ({
+      ...s,
+      liabilities: s.liabilities.map((a) => (a.id === id ? { ...a, ...patch } : a)),
+    }));
+  const remove = (id) => setState((s) => ({ ...s, liabilities: s.liabilities.filter((a) => a.id !== id) }));
+  const add = () =>
+    setState((s) => ({
+      ...s,
+      liabilities: [...s.liabilities, { id: Date.now(), name: "New liability", balanceUSD: 0, ratePct: 0 }],
+    }));
+  const total = state.liabilities.reduce((a, b) => a + b.balanceUSD, 0);
+
+  return (
+    <>
+      <div className="nw-card" style={{ marginBottom: 12 }}>
+        <div>
+          <div className="label">Total owed</div>
+          <div className="big">{fmtCurrency(total, state)}</div>
+        </div>
+      </div>
+      <div style={{ background: PAPER, borderRadius: 14, border: `1px solid ${BORDER_SOFT}`, padding: "0 14px" }}>
+        {state.liabilities.map((a) => (
+          <EditableRow
+            key={a.id}
+            name={a.name}
+            sub={`${a.ratePct}% rate`}
+            value={a.balanceUSD}
+            onValue={(v) => update(a.id, { balanceUSD: v })}
+            onName={(v) => update(a.id, { name: v })}
+            onDelete={() => remove(a.id)}
+          />
+        ))}
+      </div>
+      <button className="add-btn" onClick={add}>
+        <Plus size={13} /> Add liability
+      </button>
+    </>
+  );
+}
+
+function IncomeView({ state, setState }) {
+  const update = (id, patch) =>
+    setState((s) => ({
+      ...s,
+      income: s.income.map((a) => (a.id === id ? { ...a, ...patch } : a)),
+    }));
+  const remove = (id) => setState((s) => ({ ...s, income: s.income.filter((a) => a.id !== id) }));
+  const add = () =>
+    setState((s) => ({
+      ...s,
+      income: [...s.income, { id: Date.now(), name: "New stream", annualUSD: 0 }],
+    }));
+  const total = state.income.reduce((a, b) => a + b.annualUSD, 0);
+
+  return (
+    <>
+      <div className="nw-card" style={{ marginBottom: 12 }}>
+        <div>
+          <div className="label">Annual gross</div>
+          <div className="big">{fmtCurrency(total, state)}</div>
+        </div>
+      </div>
+      <div style={{ background: PAPER, borderRadius: 14, border: `1px solid ${BORDER_SOFT}`, padding: "0 14px" }}>
+        {state.income.map((a) => (
+          <EditableRow
+            key={a.id}
+            name={a.name}
+            sub="annual"
+            value={a.annualUSD}
+            onValue={(v) => update(a.id, { annualUSD: v })}
+            onName={(v) => update(a.id, { name: v })}
+            onDelete={() => remove(a.id)}
+          />
+        ))}
+      </div>
+      <button className="add-btn" onClick={add}>
+        <Plus size={13} /> Add income stream
+      </button>
+    </>
+  );
+}
+
+function ExpensesView({ state, setState, derived }) {
+  const update = (id, patch) =>
+    setState((s) => ({
+      ...s,
+      expenses: s.expenses.map((a) => (a.id === id ? { ...a, ...patch } : a)),
+    }));
+  const remove = (id) => setState((s) => ({ ...s, expenses: s.expenses.filter((a) => a.id !== id) }));
+  const add = () =>
+    setState((s) => ({
+      ...s,
+      expenses: [...s.expenses, { id: Date.now(), category: "Other", monthlyUSD: 0 }],
+    }));
+  const monthly = state.expenses.reduce((a, b) => a + b.monthlyUSD, 0);
+
+  const pieData = state.expenses.map((e) => ({ name: e.category, value: e.monthlyUSD }));
+
+  return (
+    <>
+      <div style={{ background: PAPER, borderRadius: 14, border: `1px solid ${BORDER_SOFT}`, padding: "16px 12px", marginBottom: 12 }}>
+        <ResponsiveContainer width="100%" height={180}>
+          <PieChart>
+            <Pie
+              data={pieData}
+              cx="50%"
+              cy="50%"
+              innerRadius={50}
+              outerRadius={75}
+              paddingAngle={2}
+              dataKey="value"
+            >
+              {pieData.map((d, i) => (
+                <Cell key={i} fill={CATEGORY_COLORS[d.name] || "#94a3b8"} />
+              ))}
+            </Pie>
+            <Tooltip formatter={(v) => fmtCurrency(v, state)} contentStyle={{ fontSize: 11 }} />
+          </PieChart>
+        </ResponsiveContainer>
+        <div style={{ textAlign: "center", marginTop: -110, fontFamily: "Fraunces", fontSize: 22, fontWeight: 600, color: NAVY }}>
+          {fmtCurrency(monthly, state)}
+        </div>
+        <div style={{ textAlign: "center", fontSize: 10, color: MUTED, marginBottom: 80 }}>est. / month</div>
+        <div style={{ display: "flex", flexWrap: "wrap", justifyContent: "center", gap: 6, marginTop: -30 }}>
+          {pieData.map((d) => (
+            <div key={d.name} style={{ display: "flex", alignItems: "center", gap: 4, fontSize: 10, color: INK }}>
+              <span style={{ width: 7, height: 7, borderRadius: "50%", background: CATEGORY_COLORS[d.name] || "#94a3b8" }} />
+              {d.name}
+            </div>
+          ))}
+        </div>
+      </div>
+
+      <div style={{ background: PAPER, borderRadius: 14, border: `1px solid ${BORDER_SOFT}`, padding: "0 14px" }}>
+        {state.expenses.map((a) => (
+          <EditableRow
+            key={a.id}
+            name={a.category}
+            sub="monthly"
+            value={a.monthlyUSD}
+            onValue={(v) => update(a.id, { monthlyUSD: v })}
+            onName={(v) => update(a.id, { category: v })}
+            onDelete={() => remove(a.id)}
+          />
+        ))}
+      </div>
+      <button className="add-btn" onClick={add}>
+        <Plus size={13} /> Add expense category
+      </button>
+    </>
+  );
+}
+
+function SplitView({ state, derived }) {
+  // shows allocation of net income
+  const investUSD = derived.savingsUSD * 0.7;
+  const stashUSD = derived.savingsUSD * 0.3;
+  const total = derived.netIncomeUSD || 1;
+  const rows = [
+    { label: "Investments", v: investUSD, color: BLUE_DEEP },
+    { label: "Savings", v: stashUSD, color: BLUE },
+    { label: "Expenses", v: derived.annualExpensesUSD, color: AMBER },
+  ];
+
+  return (
+    <div style={{ background: PAPER, borderRadius: 14, border: `1px solid ${BORDER_SOFT}`, padding: "16px" }}>
+      <div style={{ fontFamily: "JetBrains Mono", fontSize: 9, letterSpacing: "0.14em", textTransform: "uppercase", color: MUTED, marginBottom: 12 }}>
+        Net income split (annual)
+      </div>
+      {rows.map((r) => {
+        const pct = (r.v / total) * 100;
+        return (
+          <div key={r.label} style={{ marginBottom: 14 }}>
+            <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 4 }}>
+              <span style={{ fontSize: 13, fontWeight: 500 }}>{r.label}</span>
+              <span style={{ fontFamily: "JetBrains Mono", fontSize: 12, color: NAVY }}>
+                {fmtCurrency(r.v, state)} <span style={{ color: MUTED }}>· {pct.toFixed(0)}%</span>
+              </span>
+            </div>
+            <div style={{ height: 6, background: BORDER_SOFT, borderRadius: 3, overflow: "hidden" }}>
+              <div style={{ width: `${pct}%`, height: "100%", background: r.color, borderRadius: 3 }} />
+            </div>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+/* =========================================================================
+   CONTEXT TAB
+   ========================================================================= */
+function ContextTab({ state, setState }) {
+  const c = state.context;
+  const setCtx = (patch) => setState((s) => ({ ...s, context: { ...s.context, ...patch } }));
+  const yearsToReturn = c.plannedReturnYear - new Date().getFullYear();
+
+  return (
+    <div className="tab-content">
+      <div className="tab-header">
+        <h1 className="tab-title">Context</h1>
+      </div>
+
+      <div className="nw-card" style={{ marginBottom: 14 }}>
+        <div>
+          <div className="label">Return horizon</div>
+          <div className="big">
+            {yearsToReturn > 0 ? `${yearsToReturn} yrs` : "Already returned"}
+          </div>
+          <div className="meta">Target year: {c.plannedReturnYear}</div>
+        </div>
+      </div>
+
+      <div style={{ background: PAPER, borderRadius: 14, border: `1px solid ${BORDER_SOFT}`, padding: "16px" }}>
+        <div className="field-row">
+          <div className="field">
+            <label>Your age</label>
+            <input
+              type="number"
+              value={c.age}
+              onChange={(e) => setCtx({ age: parseInt(e.target.value || 0) })}
+            />
+          </div>
+          <div className="field">
+            <label>Spouse age</label>
+            <input
+              type="number"
+              value={c.spouseAge}
+              onChange={(e) => setCtx({ spouseAge: parseInt(e.target.value || 0) })}
+            />
+          </div>
+        </div>
+
+        <div className="field-row">
+          <div className="field">
+            <label>Children</label>
+            <input
+              type="number"
+              value={c.children}
+              onChange={(e) => setCtx({ children: parseInt(e.target.value || 0) })}
+            />
+          </div>
+          <div className="field">
+            <label>Return year</label>
+            <input
+              type="number"
+              value={c.plannedReturnYear}
+              onChange={(e) => setCtx({ plannedReturnYear: parseInt(e.target.value || 0) })}
+            />
+          </div>
+        </div>
+
+        <div className="field">
+          <label>Visa status</label>
+          <input
+            value={c.visaStatus}
+            onChange={(e) => setCtx({ visaStatus: e.target.value })}
+          />
+        </div>
+
+        <div className="field">
+          <label>Target corpus (USD)</label>
+          <input
+            type="number"
+            value={c.targetCorpusUSD}
+            onChange={(e) => setCtx({ targetCorpusUSD: parseFloat(e.target.value || 0) })}
+          />
+        </div>
+
+        <div className="field">
+          <label>Free-text notes for the agent</label>
+          <textarea
+            rows={4}
+            value={c.notes}
+            onChange={(e) => setCtx({ notes: e.target.value })}
+          />
+        </div>
+      </div>
+
+      <div style={{ marginTop: 14, padding: "12px 14px", background: BLUE_SOFT + "60", borderRadius: 12, border: `1px solid ${BLUE_SOFT}` }}>
+        <div style={{ fontSize: 11, color: BLUE_DEEP, fontWeight: 600, marginBottom: 4, fontFamily: "JetBrains Mono", letterSpacing: "0.1em", textTransform: "uppercase" }}>
+          How this is used
+        </div>
+        <div style={{ fontSize: 12, color: INK, lineHeight: 1.5 }}>
+          Everything here is sent to the agent in the Chat tab so it can run scenarios specific to your situation — RNOR window timing, 401k rollover strategy, school costs, return logistics.
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* =========================================================================
+   CHAT TAB — calls the Anthropic API for real
+   ========================================================================= */
+function ChatTab({ state, setTab }) {
+  const [messages, setMessages] = useState([]);
+  const [input, setInput] = useState("");
+  const [loading, setLoading] = useState(false);
+  const scrollRef = useRef(null);
+
+  useEffect(() => {
+    if (scrollRef.current) {
+      scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
+    }
+  }, [messages, loading]);
+
+  const suggestions = [
+    "Am I on track for my target corpus?",
+    "What if I delay return by 3 years?",
+    "How does RNOR change my 401k strategy?",
+    "Where are the biggest leaks in my plan?",
+  ];
+
+  const send = async (text) => {
+    const msg = text.trim();
+    if (!msg || loading) return;
+    const newMessages = [...messages, { role: "user", content: msg }];
+    setMessages(newMessages);
+    setInput("");
+    setLoading(true);
+
+    const derived = (() => {
+      const grossIncomeUSD = state.income.reduce((a, b) => a + b.annualUSD, 0);
+      const taxUSD = grossIncomeUSD * (state.settings.effectiveTaxPct / 100);
+      const netIncomeUSD = grossIncomeUSD - taxUSD;
+      const annualExpensesUSD = state.expenses.reduce((a, b) => a + b.monthlyUSD, 0) * 12;
+      const savingsUSD = Math.max(netIncomeUSD - annualExpensesUSD, 0);
+      const assetsUSD = state.assets.reduce((a, b) => a + b.valueUSD, 0);
+      const liabilitiesUSD = state.liabilities.reduce((a, b) => a + b.balanceUSD, 0);
+      const netWorthUSD = assetsUSD - liabilitiesUSD;
+      return { grossIncomeUSD, taxUSD, netIncomeUSD, annualExpensesUSD, savingsUSD, assetsUSD, liabilitiesUSD, netWorthUSD };
+    })();
+
+    const stateSummary = `
+## User's current financial state (USD)
+
+**Net worth:** $${Math.round(derived.netWorthUSD).toLocaleString()}
+**Annual savings:** $${Math.round(derived.savingsUSD).toLocaleString()}
+**Annual expenses:** $${Math.round(derived.annualExpensesUSD).toLocaleString()}
+
+**Income streams:**
+${state.income.map((i) => `- ${i.name}: $${i.annualUSD.toLocaleString()}/yr`).join("\n")}
+
+**Assets:**
+${state.assets.map((a) => `- ${a.name} (${a.type}): $${a.valueUSD.toLocaleString()}`).join("\n")}
+
+**Liabilities:**
+${state.liabilities.map((a) => `- ${a.name}: $${a.balanceUSD.toLocaleString()} @ ${a.ratePct}%`).join("\n")}
+
+**Monthly expenses:**
+${state.expenses.map((e) => `- ${e.category}: $${e.monthlyUSD.toLocaleString()}`).join("\n")}
+
+## Personal context
+
+- Age: ${state.context.age}, spouse ${state.context.spouseAge}, ${state.context.children} children
+- Visa: ${state.context.visaStatus}
+- Planned return to India: ${state.context.plannedReturnYear} (${state.context.plannedReturnYear - new Date().getFullYear()} years away)
+- Target corpus: $${state.context.targetCorpusUSD.toLocaleString()}
+- Notes: ${state.context.notes}
+
+## Assumptions
+
+- Nominal return: ${state.settings.nominalReturnPct}%
+- Inflation: ${state.settings.inflationPct}%
+- Effective tax: ${state.settings.effectiveTaxPct}%
+- Display currency: ${state.settings.displayCurrency} (FX: 1 USD = ₹${state.settings.fxUSDtoINR})
+`;
+
+    const systemPrompt = `You are an agentic FIRE planning advisor for an NRI (Non-Resident Indian) user. You have full access to their financial state and personal context below. 
+
+Your job: help them refine their FIRE plan. You can run scenarios, identify risks, and suggest specific changes. Reference actual numbers from their state — don't be generic. Be direct and concise (3–6 sentences typically). Use the user's display currency (${state.settings.displayCurrency}) when quoting figures unless USD is clearly more natural.
+
+Cover NRI-specific topics confidently when relevant: RNOR window strategy, DTAA, 401k/IRA decisions on India return, PFIC for India MFs held by US tax residents, capital gains timing, NRO/NRE accounts.
+
+Never give legal or tax advice as final — frame as "directionally" or "consider with a CA/CPA who knows cross-border."
+
+${stateSummary}`;
+
+    try {
+      const response = await fetch("https://api.anthropic.com/v1/messages", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          model: "claude-sonnet-4-20250514",
+          max_tokens: 1000,
+          system: systemPrompt,
+          messages: newMessages.map((m) => ({ role: m.role, content: m.content })),
+        }),
+      });
+      const data = await response.json();
+      const reply = data.content
+        ?.filter((c) => c.type === "text")
+        .map((c) => c.text)
+        .join("\n") || "(no response)";
+      setMessages((m) => [...m, { role: "assistant", content: reply }]);
+    } catch (err) {
+      setMessages((m) => [
+        ...m,
+        { role: "assistant", content: `Sorry — I couldn't reach the agent. (${err.message})` },
+      ]);
+    }
+    setLoading(false);
+  };
+
+  return (
+    <div className="tab-content" style={{ display: "flex", flexDirection: "column" }}>
+      <div className="tab-header">
+        <h1 className="tab-title">Chat</h1>
+        <div style={{ display: "flex", alignItems: "center", gap: 5, fontSize: 10, color: MUTED, fontFamily: "JetBrains Mono", letterSpacing: "0.05em" }}>
+          <span style={{ width: 6, height: 6, borderRadius: "50%", background: GREEN }} />
+          AGENT ONLINE
+        </div>
+      </div>
+
+      <div className="chat-msgs" ref={scrollRef} style={{ minHeight: 380 }}>
+        {messages.length === 0 && (
+          <div className="chat-empty">
+            <div className="glyph">
+              <Sparkles size={20} />
+            </div>
+            <h3>Ask the agent anything</h3>
+            <div style={{ marginBottom: 14 }}>
+              I can see your full ledger and context. Try:
+            </div>
+            <div>
+              {suggestions.map((s) => (
+                <span key={s} className="suggest-chip" onClick={() => send(s)}>
+                  {s}
+                </span>
+              ))}
+            </div>
+            <div style={{ marginTop: 18, fontSize: 11, color: MUTED }}>
+              Missing data? <span style={{ color: BLUE, cursor: "pointer", textDecoration: "underline" }} onClick={() => setTab("context")}>Edit context →</span>
+            </div>
+          </div>
+        )}
+        {messages.map((m, i) => (
+          <div key={i} className={`chat-bubble ${m.role}`}>
+            {m.content}
+          </div>
+        ))}
+        {loading && (
+          <div className="chat-bubble assistant" style={{ display: "flex", alignItems: "center", gap: 6, color: MUTED }}>
+            <Loader2 size={13} className="spin" />
+            <span>thinking…</span>
+            <style>{`.spin { animation: spin 1s linear infinite; } @keyframes spin { from { transform: rotate(0); } to { transform: rotate(360deg); } }`}</style>
+          </div>
+        )}
+      </div>
+
+      <div className="chat-input">
+        <input
+          value={input}
+          onChange={(e) => setInput(e.target.value)}
+          onKeyDown={(e) => e.key === "Enter" && send(input)}
+          placeholder="Ask about your plan…"
+        />
+        <button className="chat-send" onClick={() => send(input)} disabled={loading || !input.trim()}>
+          <Send size={14} />
+        </button>
+      </div>
+    </div>
+  );
+}
+
+/* =========================================================================
+   SETTINGS TAB
+   ========================================================================= */
+function SettingsTab({ state, setState }) {
+  const s = state.settings;
+  const set = (patch) => setState((st) => ({ ...st, settings: { ...st.settings, ...patch } }));
+
+  return (
+    <div className="tab-content">
+      <div className="tab-header">
+        <h1 className="tab-title">Settings</h1>
+      </div>
+
+      <div style={{ background: PAPER, borderRadius: 14, border: `1px solid ${BORDER_SOFT}`, padding: "16px", marginBottom: 12 }}>
+        <div style={{ fontFamily: "JetBrains Mono", fontSize: 9, letterSpacing: "0.14em", textTransform: "uppercase", color: MUTED, marginBottom: 12 }}>
+          Display
+        </div>
+        <div className="field">
+          <label>Currency</label>
+          <select value={s.displayCurrency} onChange={(e) => set({ displayCurrency: e.target.value })}>
+            <option value="INR">INR (₹)</option>
+            <option value="USD">USD ($)</option>
+          </select>
+        </div>
+        <div className="field">
+          <label>FX rate (1 USD = ₹)</label>
+          <input
+            type="number"
+            step="0.1"
+            value={s.fxUSDtoINR}
+            onChange={(e) => set({ fxUSDtoINR: parseFloat(e.target.value || 0) })}
+          />
+        </div>
+      </div>
+
+      <div style={{ background: PAPER, borderRadius: 14, border: `1px solid ${BORDER_SOFT}`, padding: "16px", marginBottom: 12 }}>
+        <div style={{ fontFamily: "JetBrains Mono", fontSize: 9, letterSpacing: "0.14em", textTransform: "uppercase", color: MUTED, marginBottom: 12 }}>
+          Projection assumptions
+        </div>
+        <div className="field-row">
+          <div className="field">
+            <label>Nominal return %</label>
+            <input
+              type="number"
+              step="0.1"
+              value={s.nominalReturnPct}
+              onChange={(e) => set({ nominalReturnPct: parseFloat(e.target.value || 0) })}
+            />
+          </div>
+          <div className="field">
+            <label>Inflation %</label>
+            <input
+              type="number"
+              step="0.1"
+              value={s.inflationPct}
+              onChange={(e) => set({ inflationPct: parseFloat(e.target.value || 0) })}
+            />
+          </div>
+        </div>
+        <div className="field-row">
+          <div className="field">
+            <label>Effective tax %</label>
+            <input
+              type="number"
+              step="0.5"
+              value={s.effectiveTaxPct}
+              onChange={(e) => set({ effectiveTaxPct: parseFloat(e.target.value || 0) })}
+            />
+          </div>
+          <div className="field">
+            <label>Projection years</label>
+            <input
+              type="number"
+              value={s.projectionYears}
+              onChange={(e) => set({ projectionYears: parseInt(e.target.value || 0) })}
+            />
+          </div>
+        </div>
+      </div>
+
+      <div style={{ padding: "14px", background: CREAM, borderRadius: 12, fontSize: 11, color: MUTED, lineHeight: 1.5 }}>
+        State is held in memory for this session only. To persist between sessions, you'd add localStorage or a backend (Supabase / Convex / Firebase). Export/import is also one button away if you want a Plaid-free workflow.
+      </div>
+    </div>
+  );
+}
